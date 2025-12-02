@@ -14,6 +14,17 @@ struct GameBuffer {
     int height;
     int pitch;          // Bytes por fila
 };
+struct ButtonState{
+    bool is_down; // Esta presionado ahora mismo?
+    bool changed; // ¿Cambio de estado en este frame? (Para detectar 'One press')
+};
+
+struct GameInput {
+    ButtonState up;
+    ButtonState down;
+    ButtonState left;
+    ButtonState right;
+};
 // ##################################################################
 //                          Platform Globals
 // ##################################################################
@@ -27,7 +38,7 @@ static GameBuffer global_back_buffer;
 // ##################################################################
 
 bool platform_create_window(int width, int height, char* title); 
-void platform_update_window(); // Procesa mensajes (Teclado/Mouse)
+void platform_update_window(GameInput* input); // Procesa mensajes (Teclado/Mouse)
 void platform_blit_to_window(); // Copia el buffer a la pantalla (Nuevo)
 // ##################################################################
 //                          Windows Platform
@@ -72,6 +83,7 @@ void win32_resize_DIB_section(GameBuffer* buffer, int width, int height) {
     // Pedimos memoria al sistema
     buffer->memory = VirtualAlloc(0, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE);
 }
+
 // ##################################################################
 //                         Windows callbacks
 // ##################################################################
@@ -132,6 +144,7 @@ bool platform_create_window(int width, int height, char* title)
     // WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
     int dwStyle = WS_OVERLAPPEDWINDOW;
 
+    //Creamos la ventana visual. Envia un mensaje a WM_SIZE
     window = CreateWindowExA(0, title,  //This reference lpszClassName from wc
         title,  //This is the actual Title
         dwStyle,
@@ -153,12 +166,52 @@ bool platform_create_window(int width, int height, char* title)
 
 }
 
-void platform_update_window(){
+// Función auxiliar interna para actualizar un botón
+void win32_process_keyboard_message(ButtonState* new_state, bool is_down) {
+    if (new_state->is_down != is_down) {
+        new_state->is_down = is_down;
+        new_state->changed = true;
+    } else {
+        new_state->changed = false;
+    }
+}
+
+void platform_update_window(GameInput* input){
     MSG msg;
 
     while(PeekMessageA(&msg, window, 0, 0, PM_REMOVE)){
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg); // Calls the callback specified when creating  the window
+        switch (msg.message)
+            {
+            case WM_KEYUP:
+            case WM_KEYDOWN: {
+                // El bit 31 de lParam nos dice si la tecla ya estaba presionada antes (autorepeat)
+                // y el bit 30 si estaba presionada antes del mensaje.
+                // Para ser precisos
+                bool is_down = (msg.message == WM_KEYDOWN);
+
+                // wParam contiene el CÓDIGO de la tecla (VK_CODE)
+                uint32_t vk_code = (uint32_t)msg.wParam;
+
+                if (vk_code == VK_UP) {
+                    win32_process_keyboard_message(&input->up, is_down);
+                }
+                else if (vk_code == VK_DOWN) {
+                    win32_process_keyboard_message(&input->down, is_down);
+                }
+                else if (vk_code == VK_LEFT) {
+                    win32_process_keyboard_message(&input->left, is_down);
+                }
+                else if (vk_code == VK_RIGHT) {
+                    win32_process_keyboard_message(&input->right, is_down);
+                }
+            } break;
+        
+            default: {
+                TranslateMessage(&msg);
+                DispatchMessageA(&msg); // Calls the callback specified when creating  the window
+            }   break;
+
+        }
     }
 }
 void platform_blit_to_window() {
@@ -183,54 +236,95 @@ void platform_blit_to_window() {
     ReleaseDC(window, device_context);
 }
 #endif // _WIN32
-
 // ##################################################################
-//                          Main (Game Loop)
+//                              Graphics Functions
 // ##################################################################
 
-// Función auxiliar para dibujar el degradado (Simula ser el juego)
-void render_game(GameBuffer* buffer, int x_offset, int y_offset) {
-    // PASO 1: El Puntero Inicial
-    // "row" apunta al byte número 0 de nuestra memoria (la esquina de arriba a la izquierda).
-    // Usamos uint8_t (1 byte) porque queremos poder movernos byte por byte si es necesario.
+void draw_rect(GameBuffer* buffer, int x, int y, int width, int height, uint32_t color){
+    // 1. Calcular los limites (Bounding box)
+    int min_x = x;
+    int min_y = y;
+    int max_x = x+width;
+    int max_y = y+height;
+
+    // 2. Clipping (Recorte de seguridad)
+    // Si el rectángulo está totalmente fuera de la pantalla, no dibujamos nada
+    if (min_x >= buffer->width) return;
+    if (min_y >= buffer->height) return;
+    if (max_x < 0) return;
+    if (max_y < 0) return;
+
+    // Si se sale un poco por los bordes, lo "empujamos" adentro
+    if (min_x < 0) min_x = 0;
+    if (min_y < 0) min_y = 0;
+    if (max_x > buffer->width) max_x = buffer->width;
+    if (max_y > buffer->height) max_y = buffer->height;
+
+    // 3. Dibujado
+    // Calculamos dónde empieza la memoria para la primera fila a dibujar
     uint8_t* row = (uint8_t*)buffer->memory;
 
-    // Bucle Y: Vamos fila por fila (de arriba a abajo)
-    for (int y = 0; y < buffer->height; ++y) {
-        // PASO 2: El Puntero de Píxeles
-        // Aquí hacemos un CAST (Transformación).
-        // Le decimos al compilador: "Oye, en esta fila, deja de ver bytes sueltos (uint8).
-        // Quiero que veas bloques de 4 bytes (uint32)".
-        // ¿Por qué? Porque 1 píxel = 4 bytes. 
-        // Escribir un uint32 es pintar un píxel entero de golpe.
+    // Avanzamos hasta la fila 'min_y' usando el Pitch
+    row += min_y * buffer->pitch;
+
+    // Avanzamos hasta la columna 'min_x' (4 bytes por pixel)
+    row += min_x * 4;
+
+    for (int current_y = min_y; current_y < max_y; ++current_y) {
+        
         uint32_t* pixel = (uint32_t*)row;
 
-        // Bucle X: Vamos columna por columna (de izquierda a derecha)
-        for (int x = 0; x < buffer->width; ++x) {
-            // PASO 3: Crear el color (Matemáticas)
-            // x_offset y y_offset son números que crecen (0, 1, 2...) en cada frame.
-            // Al sumar (x + x_offset), el valor del color cambia según la posición.
-            // Como es uint8, si llega a 255 y sumas 1, vuelve a 0 (efecto ciclo).
-            uint8_t blue = (x + x_offset);
-            uint8_t green = (y + y_offset);
-            
-
-            // PASO 4: Empaquetar los bits (Bit Shifting)
-            // Esto es: 00000000(R) 11111111(G) 00000000(B)
-            // El operador '|' pega los trozos. '<< 8' empuja el verde a su sitio.
-            *pixel = (rand() % 255) | ((rand() % 255) << 8) | ((rand() % 255) << 16);
-
-            // PASO 5: Avanzar
-            // Como 'pixel' es uint32, al hacer ++, el puntero salta 4 bytes automáticamente.
-            // Pasamos al siguiente píxel a la derecha.
-            pixel++; 
+        for (int current_x = min_x; current_x < max_x; ++current_x) {
+            *pixel = color;
+            pixel++;
         }
-        // PASO 6: Bajar de renglón
-        // Terminamos la fila X. Ahora tenemos que saltar al inicio de la siguiente fila Y.
-        // Sumamos el 'pitch' a nuestro puntero original de bytes.
+
+        // Al terminar la fila pequeña del rectángulo, saltamos a la siguiente línea de la pantalla
+        // Importante: 'row' ya está apuntando al inicio (min_x) de esta fila,
+        // así que solo sumamos el pitch para bajar recto.
         row += buffer->pitch;
     }
 }
+// Función para limpiar la pantalla (pintarla toda de un color)
+void clear_screen(GameBuffer* buffer, uint32_t color){
+    uint8_t* row = (uint8_t*)buffer->memory;
+    for (int y = 0; y < buffer->height; ++y) {
+        uint32_t* pixel = (uint32_t*)row;
+        for (int x = 0; x < buffer->width; ++x) {
+            *pixel = color;
+            pixel++;
+        }
+        row += buffer->pitch;
+    }
+}
+// ##################################################################
+//                          Main (Game Loop)
+// ##################################################################
+// Estado del juego (Variables simples)
+
+static int player_x = 100;
+static int player_y = 100;
+
+
+void game_update_and_render(GameBuffer* buffer, GameInput* input) {
+    // 1. Limpiar pantalla (Fondo negro)
+    clear_screen(buffer, 0xFF222222); // 0x00RRGGBB (Todo 0 es negro)
+
+    // 2. Lógica del Juego (Input)
+    int speed = 10;
+
+    if (input->up.is_down)    player_y -= speed; // En computación, Y disminuye hacia arriba
+    if (input->down.is_down)  player_y += speed;
+    if (input->left.is_down)  player_x -= speed;
+    if (input->right.is_down) player_x += speed;
+    
+
+    // 3. Dibujar Jugador (Cuadrado Verde)
+    // Color: 0x0000FF00 (Verde puro)
+    draw_rect(buffer, player_x, player_y, 50, 50, 0x0000FF00); 
+    
+}
+
 int main() { 
     std::cout << "Inicializando strangerEngine..." << std::endl;
 
@@ -244,30 +338,30 @@ int main() {
 
     std::cout << "Motor corriendo..." << std::endl;
 
-    int x_offset = 0;
-    int y_offset = 0;
+    // Creamos la estructura de input vacía
+    GameInput input = {};
 
     // 2. Bucle Principal
     while(running){
         
         // A. Input / Mensajes del Sistema
-        platform_update_window();
+        platform_update_window(&input);
 
         // B. Game Logic & Render (Dibujar en RAM)
         // Nota: Aquí pasamos el buffer genérico, no sabemos nada de Windows
         if (global_back_buffer.memory) {
-            render_game(&global_back_buffer, x_offset, y_offset);
+            game_update_and_render(&global_back_buffer, &input);
         }
 
-        // Animación simple
-        x_offset++;
-        y_offset += 2;
 
         // C. Blit (Copiar RAM a Ventana)
         // Aquí le decimos a la plataforma: "Ya dibujé, muéstralo".
         #ifdef _WIN32
         platform_blit_to_window();
         #endif
+
+        Sleep(16); // ~60 FPS chapuza
+        
     }
 
     std::cout << "Apagando strangerEngine." << std::endl;
