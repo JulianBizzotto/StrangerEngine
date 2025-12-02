@@ -179,18 +179,62 @@ void draw_rect(GameBuffer* buffer, int x, int y, int width, int height, uint32_t
         row += buffer->pitch;
     }
 }
+bool check_collision(float x1, float y1, int w1, int h1, float x2, float y2, int w2, int h2){
+   
+    //1.Calcular los bordes
+    bool collision_x = (x1<x2+w2) && (x1+w1>x2);
+    bool collision_y = (y1<y2+h2) && (y1+h1>y2);
 
+    // Si se solapan en X y también en Y, hay colisión real
+    return collision_x && collision_y;
+
+}
 void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
+
+    // 1. Limpiar pantalla
     draw_rect(buffer, 0, 0, buffer->width, buffer->height, 0xFF333333);
 
-    float speed = 500.0f; 
+    // 2. Definir Obstáculo (Pared)
+    float wall_x = 400.0f;
+    float wall_y = 300.0f;
+    int wall_w = 100;
+    int wall_h = 200;
 
-    if (input->left.is_down)  player_x -= speed * dt;
-    if (input->right.is_down) player_x += speed * dt;
-    if (input->up.is_down)    player_y -= speed * dt;
-    if (input->down.is_down)  player_y += speed * dt;
+    // 3. Movimiento del Jugador (Tentativo)
+    // Guardamos la posición "futura"
+    float next_x = player_x;
+    float next_y = player_y;
+    float speed = 500.0f;
 
-    draw_rect(buffer, (int)player_x, (int)player_y, 50, 50, 0xFF00FF00); 
+
+    if (input->left.is_down)  next_x -= speed * dt;
+    if (input->right.is_down) next_x += speed * dt;
+    if (input->up.is_down)    next_y -= speed * dt;
+    if (input->down.is_down)  next_y += speed * dt;
+
+    // 4. DETECCIÓN DE COLISIÓN
+    // Verificamos si la posición futura toca la pared
+    bool hit = check_collision(next_x, next_y, 50, 50, wall_x, wall_y, wall_w, wall_h);
+
+    // Color del jugador
+    uint32_t player_color = 0xFF00FF00; // Verde (Normal)
+
+    if (hit) {
+        player_color = 0xFFFF0000; // Rojo (Choque!)
+        // OPCIÓN A: Atravesar la pared pero cambiar color (Trigger)
+        player_x = next_x;
+        player_y = next_y;
+    } else {
+        // Si no choca, nos movemos normalmente
+        player_x = next_x;
+        player_y = next_y;
+    }
+
+    // 5. Dibujar Obstáculo (Gris claro)
+    draw_rect(buffer, (int)wall_x, (int)wall_y, wall_w, wall_h, 0xFF888888);
+
+    // 6. Dibujar Jugador
+    draw_rect(buffer, (int)player_x, (int)player_y, 50, 50, player_color); 
 }
 
 int main() { 
