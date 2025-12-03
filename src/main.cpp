@@ -23,6 +23,12 @@ struct GameInput {
     ButtonState right;
 };
 
+struct LoadedBitmap {
+    int width;
+    int height;
+    uint32_t* pixels; // Puntero a la memoria donde están los colores de la imagen
+};
+
 // ##################################################################
 //                          Platform Globals
 // ##################################################################
@@ -52,6 +58,7 @@ void platform_blit_to_window();
 
 static HWND window;
 static BITMAPINFO bitmap_info; 
+static LoadedBitmap hero_bitmap;
 
 void win32_resize_DIB_section(GameBuffer* buffer, int width, int height) {
     if (buffer->memory) {
@@ -156,6 +163,36 @@ void platform_blit_to_window() {
 //                          Main (Game Logic)
 // ##################################################################
 
+// Crea una textura de ajedrez en memoria
+LoadedBitmap make_test_bitmap(int width, int height) {
+    LoadedBitmap bmp = {};
+    bmp.width = width;
+    bmp.height = height;
+    
+    // Reservamos memoria para esta imagen (4 bytes por pixel)
+    // Usamos VirtualAlloc igual que con la pantalla
+    int size = width * height * 4;
+    bmp.pixels = (uint32_t*)VirtualAlloc(0, size, MEM_COMMIT, PAGE_READWRITE);
+
+    // Rellenamos los píxeles
+    uint32_t* pixel_ptr = bmp.pixels;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            // Truco matemático para hacer un tablero de ajedrez
+            // Si la suma de las coordenadas / 8 es par o impar...
+            bool black = ((x / 8) + (y / 8)) % 2 == 0;
+            
+            if (black) {
+                *pixel_ptr = 0xFF000000; // Negro
+            } else {
+                *pixel_ptr = 0xFFFF00FF; // Magenta brillante
+            }
+            pixel_ptr++;
+        }
+    }
+    return bmp;
+}
+
 void draw_rect(GameBuffer* buffer, int x, int y, int width, int height, uint32_t color) {
     int min_x = x;
     int min_y = y;
@@ -189,6 +226,57 @@ bool check_collision(float x1, float y1, int w1, int h1, float x2, float y2, int
     return collision_x && collision_y;
 
 }
+
+void draw_bitmap(GameBuffer* buffer, LoadedBitmap* bitmap, int x, int y){
+    int min_x = x;
+    int min_y = y;
+    int max_x = x+ bitmap->width;
+    int max_y = y + bitmap->height;
+
+    // Clipping (Protección de bordes)
+    // IMPORTANTE: Si recortamos el dibujo en la pantalla, también tenemos
+    // que saber desde qué pixel de la textura empezamos a copiar.
+    int source_offset_x = 0;
+    int source_offset_y = 0;
+
+    if (min_x < 0) {
+        source_offset_x = -min_x; // Empezamos más adentro en la textura
+        min_x = 0;
+    }
+    if (min_y < 0) {
+        source_offset_y = -min_y;
+        min_y = 0;
+    }
+    if (max_x > buffer->width) max_x = buffer->width;
+    if (max_y > buffer->height) max_y = buffer->height;
+
+    // Punteros iniciales
+    // Pantalla:
+    uint8_t* dest_row = (uint8_t*)buffer->memory + (min_y * buffer->pitch) + (min_x * 4);
+
+    // Textura (Fuente):
+    // La textura es lineal y compacta (pitch = width * 4)
+    uint32_t* source_row = bitmap->pixels + (source_offset_y * bitmap->width) + source_offset_x;
+    for (int cy = min_y; cy < max_y; ++cy) {
+        
+        uint32_t* dest_pixel = (uint32_t*)dest_row;
+        uint32_t* source_pixel = source_row;
+
+        for (int cx = min_x; cx < max_x; ++cx) {
+            // COPIADO SIMPLE (Sin transparencia aun)
+            // Leemos de la textura -> Escribimos en pantalla
+            *dest_pixel = *source_pixel;
+
+            dest_pixel++;
+            source_pixel++;
+        }
+        
+        // Avanzar a la siguiente fila
+        dest_row += buffer->pitch;
+        source_row += bitmap->width; // En la textura el pitch es simplemente el ancho
+    }
+}
+
 void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
 
     // 1. Limpiar pantalla
@@ -234,7 +322,7 @@ void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
     draw_rect(buffer, (int)wall_x, (int)wall_y, wall_w, wall_h, 0xFF888888);
 
     // 6. Dibujar Jugador
-    draw_rect(buffer, (int)player_x, (int)player_y, 50, 50, player_color); 
+    draw_bitmap(buffer, &hero_bitmap, (int)player_x, (int)player_y);
 }
 
 int main() { 
@@ -257,6 +345,9 @@ int main() {
 
     LARGE_INTEGER last_counter;
     QueryPerformanceCounter(&last_counter);
+
+    // Crear una textura de 32x32 pixeles
+    hero_bitmap = make_test_bitmap(32, 32);
 
     while(running){
         LARGE_INTEGER work_counter_begin; 
