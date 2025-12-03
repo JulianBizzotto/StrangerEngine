@@ -1,6 +1,6 @@
 #include <iostream>
 #include <stdint.h> 
-
+#include <stdio.h> // <--- NUEVO: Necesario para fopen, fseek, fread
 // ##################################################################
 //                          Engine Types
 // ##################################################################
@@ -29,6 +29,14 @@ struct LoadedBitmap {
     uint32_t* pixels; // Puntero a la memoria donde están los colores de la imagen
 };
 
+// Estructura para devolver el archivo crudo
+struct ReadResult {
+    void* content; // Puntero a los datos leídos
+    size_t content_size; // Tamaño de los datos leídos
+};
+
+
+
 // ##################################################################
 //                          Platform Globals
 // ##################################################################
@@ -44,7 +52,9 @@ static float player_y = 100.0f;
 bool platform_create_window(int width, int height, const char* title); 
 void platform_update_window(GameInput* input);
 void platform_blit_to_window(); 
-
+ReadResult debug_read_entire_file(const char* filename);
+void free_file_memory(void* memory);
+LoadedBitmap debug_load_bmp(const char* filename);
 // ##################################################################
 //                          Windows Platform
 // ##################################################################
@@ -156,6 +166,70 @@ void platform_blit_to_window() {
         0, 0, global_back_buffer.width, global_back_buffer.height,
         global_back_buffer.memory, &bitmap_info, DIB_RGB_COLORS, SRCCOPY);
     ReleaseDC(window, device_context);
+}
+
+// Funcion para liberar la memoria del archivo despues
+void free_file_memory(void* memory) {
+    if (memory) {
+        VirtualFree(memory, 0, MEM_RELEASE);
+    }
+}
+
+// ##################################################################
+//          Implementacion de carga de archivos (version windows)    
+// ##################################################################
+
+//Lee todo el archivo de un tiron
+ReadResult debug_read_entire_file(const char* filename) {
+    ReadResult result = {};
+
+
+    // Abrimos el archivo (CreateFile es la forma Win32, pero fopen es más estándar C)
+    // Usaremos fopen para que sea más legible, asegúrate de incluir <stdio.h>
+    FILE* file = fopen(filename, "rb");
+
+    if(file){
+        // Buscamos el final para saber el tamaño
+        fseek(file, 0, SEEK_END);
+        result.content_size = ftell(file); // Obtenemos el tamaño del archivo
+        fseek(file, 0, SEEK_SET); // Volvemos al inicio del archivo
+
+        // Pedimos memoria
+        result.content = VirtualAlloc(0, result.content_size, MEM_COMMIT, PAGE_READWRITE);
+
+        //Leemos todo
+        fread(result.content, result.content_size, 1, file);
+        fclose(file); // Cerramos el archivo
+    } else {
+        std::cout << "Error al abrir el archivo: " << filename << std::endl;
+    }
+    return result;
+}
+LoadedBitmap debug_load_bmp(const char* filename) {
+    LoadedBitmap result = {};
+    ReadResult file = debug_read_entire_file(filename);
+
+    if (file.content && file.content_size > 0) {
+        BITMAPFILEHEADER* file_header = (BITMAPFILEHEADER*)file.content;
+        BITMAPINFOHEADER* info_header = (BITMAPINFOHEADER*)((uint8_t*)file.content + sizeof(BITMAPFILEHEADER));
+
+        // --- VALIDACIÓN DE SEGURIDAD ---
+        // Si la imagen no es de 32 bits, no podemos leerla con nuestro código actual.
+        // Evitamos el crash devolviendo una imagen vacía.
+        if (info_header->biBitCount != 32) {
+            std::cout << "ERROR: El archivo BMP no es de 32 bits (" << info_header->biBitCount << " bits detectados)." << std::endl;
+            std::cout << "Por favor guarda la imagen como 'Bitmap de 32 bits' (con canal Alpha)." << std::endl;
+            // Liberamos la memoria del archivo porque no la vamos a usar
+            free_file_memory(file.content);
+            return result; // Retornamos vacío (esto activará el fallback en el main)
+        }
+        // -------------------------------
+
+        result.width = info_header->biWidth;
+        result.height = info_header->biHeight;
+        result.pixels = (uint32_t*)((uint8_t*)file.content + file_header->bfOffBits);
+    }
+    return result;
 }
 #endif // _WIN32
 
@@ -277,6 +351,8 @@ void draw_bitmap(GameBuffer* buffer, LoadedBitmap* bitmap, int x, int y){
     }
 }
 
+
+
 void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
 
     // 1. Limpiar pantalla
@@ -323,6 +399,7 @@ void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
 
     // 6. Dibujar Jugador
     draw_bitmap(buffer, &hero_bitmap, (int)player_x, (int)player_y);
+
 }
 
 int main() { 
@@ -346,8 +423,23 @@ int main() {
     LARGE_INTEGER last_counter;
     QueryPerformanceCounter(&last_counter);
 
-    // Crear una textura de 32x32 pixeles
-    hero_bitmap = make_test_bitmap(32, 32);
+
+    // --- CARGAR ASSETS ---
+    hero_bitmap = debug_load_bmp("C:\\Users\\thesu\\Desktop\\BizzottoProjects\\StrangerEngine\\test_hero.bmp");
+    
+    if(hero_bitmap.pixels == NULL) {
+        // 1. Mostrar Alerta Visual (Esto detiene el programa hasta que le das OK)
+        MessageBoxA(
+            NULL, 
+            "No se pudo cargar test_hero.bmp.\nSe usara una textura por defecto.", 
+            "Advertencia de Assets", 
+            MB_OK | MB_ICONWARNING
+        );
+
+        // 2. PLAN B (Fallback): Usar textura generada para no cerrar el juego
+        std::cout << "Usando textura procedural..." << std::endl;
+        hero_bitmap = make_test_bitmap(32, 32);
+    }
 
     while(running){
         LARGE_INTEGER work_counter_begin; 
@@ -377,6 +469,7 @@ int main() {
         long long work_elapsed = work_counter_end.QuadPart - work_counter_begin.QuadPart;
         float seconds_elapsed_for_work = (float)work_elapsed / (float)perf_count_frequency;
         float seconds_elapsed_total = seconds_elapsed_for_work;
+
 
         while (seconds_elapsed_total < target_seconds_per_frame) {
             // Si nos falta mucho tiempo, dormimos un poco para no quemar CPU
