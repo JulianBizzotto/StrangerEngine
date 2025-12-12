@@ -432,6 +432,67 @@ void draw_bitmap(GameBuffer* buffer, LoadedBitmap* bitmap, int x, int y){
     }
 }
 
+void draw_bitmap_alpha(GameBuffer* buffer, LoadedBitmap* bitmap, float x, float y){
+    int min_x = (int)x;
+    int min_y = (int)y;
+    int max_x = min_x + bitmap->width;
+    int max_y = min_y + bitmap->height;
+
+
+    // Clipping calculation
+    int source_offset_x = 0;
+    int source_offset_y = 0;
+
+    if(min_x < 0 ) { source_offset_x = -min_x; min_x = 0; }
+    if(min_y < 0 ) { source_offset_y = -min_y; min_y = 0; }
+    if(max_x > buffer->width )  max_x = buffer->width;
+    if(max_y > buffer->height ) max_y = buffer->height;
+
+
+    uint8_t* dest_row = (uint8_t*)buffer->memory + (min_y * buffer->pitch) + (min_x * 4);
+    uint32_t* source_row = bitmap->pixels + (source_offset_y * bitmap->width) + source_offset_x;
+
+
+    for(int cy = min_y; cy < max_y; ++cy) {
+        uint32_t* dest_pixel = (uint32_t*)dest_row;
+        uint32_t* source_pixel = source_row;
+
+        for(int cx = min_x; cx < max_x; ++cx) {
+            uint32_t src_color = *source_pixel;
+
+            // Extract alpha component
+            uint8_t alpha = (src_color >> 24) & 0xFF;
+
+            if (alpha == 0){
+
+            }
+            else if (alpha == 255){
+                *dest_pixel = src_color;
+            }
+            else {
+                float a = (float)alpha / 255.0f;
+                uint8_t src_r = (src_color >> 16) & 0xFF;
+                uint8_t src_g = (src_color >> 8) & 0xFF;
+                uint8_t src_b = src_color & 0xFF;
+
+                uint32_t dst_color = *dest_pixel;
+                uint8_t dst_r = (dst_color >> 16) & 0xFF;
+                uint8_t dst_g = (dst_color >> 8) & 0xFF;
+                uint8_t dst_b = dst_color & 0xFF;
+
+                uint8_t final_r = (uint8_t)((src_r * a) + (dst_r * (1.0f - a)));
+                uint8_t final_g = (uint8_t)((src_g * a) + (dst_g * (1.0f - a)));
+                uint8_t final_b = (uint8_t)((src_b * a) + (dst_b * (1.0f - a)));
+
+                *dest_pixel = (0xFF << 24) | (final_r << 16) | (final_g << 8) | final_b;
+            }
+            dest_pixel++;
+            source_pixel++;
+        }
+        dest_row += buffer->pitch;
+        source_row += bitmap->width;
+    }
+}
 // Main game update and rendering function
 // Called once per frame with delta time since last frame
 void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
@@ -479,7 +540,7 @@ void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
     draw_rect(buffer, (int)wall_x, (int)wall_y, wall_w, wall_h, 0xFF888888);
 
     // 6. Draw player sprite
-    draw_bitmap(buffer, &hero_bitmap, (int)player_x, (int)player_y);
+    draw_bitmap_alpha(buffer, &hero_bitmap, player_x, player_y);
 }
 
 // Main entry point of the application
