@@ -195,6 +195,63 @@ void win32_init_dsound(HWND window, int32_t samples_per_second, int32_t buffer_s
     }
 }
 
+void win32_fill_sound_buffer(GameSoundOutput* sound_output, DWORD byte_to_lock, DWORD bytes_to_write) {
+    VOID* region1;
+    DWORD region1_size;
+    VOID* region2;
+    DWORD region2_size;
+
+
+    // Bloquear el buffer secundario para escribir audio
+    if (SUCCEEDED(global_secondary_buffer->Lock(byte_to_lock, bytes_to_write,
+        &region1, &region1_size,
+        &region2, &region2_size,
+        0))) {
+
+        // Llenar región 1
+        int16_t* sample_out = (int16_t*)region1;
+        DWORD region1_sample_count = region1_size / sound_output->bytes_per_sample;
+
+        for (DWORD i = 0; i < region1_sample_count; ++i) {
+            float sine_value = sinf(sound_output->t_sine);
+            int16_t sample_value = (int16_t)(sine_value * 3000); // 3000 es el volumen (Max 32000)
+
+            // Escribir muestra en ambos canales (stereo)
+            *sample_out++ = sample_value; // Canal izquierdo
+            *sample_out++ = sample_value; // Canal derecho
+            
+            //Avanzamos el oscilador
+            sound_output->t_sine += 2.0f * M_PI * 256.0f / (float)sound_output->samples_per_second;
+            if(sound_output ->t_sine > 2.0f * M_PI) {
+                sound_output->t_sine -= 2.0f * M_PI;
+            }
+            sound_output->running_sample_index++;
+        }
+
+        // Llenar región 2 si existe
+        sample_out = (int16_t*)region2;
+        DWORD region2_sample_count = region2_size / sound_output->bytes_per_sample;
+
+        for (DWORD i = 0; i < region2_sample_count; ++i) {
+            float sine_value = sinf(sound_output->t_sine);
+            int16_t sample_value = (int16_t)(sine_value * 3000); // Volumen
+
+            *sample_out++ = sample_value; // Canal izquierdo
+            *sample_out++ = sample_value; // Canal derecho
+
+
+            sound_output->t_sine += 2.0f * M_PI * 256.0f / (float)sound_output->samples_per_second;
+            if(sound_output ->t_sine > 2.0f * M_PI) {
+                sound_output->t_sine -= 2.0f * M_PI;
+            }
+            sound_output->running_sample_index++;
+
+        }
+
+        global_secondary_buffer->Unlock(region1, region1_size, region2, region2_size);
+    }
+}
+
 // Allocates and resizes the back buffer to the specified dimensions
 void win32_resize_DIB_section(GameBuffer* buffer, int width, int height) {
     // Free existing memory if any
@@ -694,13 +751,47 @@ int main() {
     // Inicializamos DirectSound
     win32_init_dsound(window, sound_output.samples_per_second, sound_output.secondary_buffer_size);
     
-    // Arrancamos el buffer en silencio (Looping infinito)
+    // Llenado inicial (Pre-roll): Llenamos todo el buffer de silencio/sonido antes de arrancar
+    // para evitar que suene "basura" al principio.
+    win32_fill_sound_buffer(&sound_output, 0, sound_output.latency_sample_count * sound_output.bytes_per_sample);
+    
+    // START ENGINE: Le damos Play en modo LOOPING
     if (global_secondary_buffer) {
         global_secondary_buffer->Play(0, 0, DSBPLAY_LOOPING);
     }
 
     // --- MAIN GAME LOOP ---
     while(running){
+
+        // --- AUDIO: Actualización por Frame ---
+        DWORD play_cursor;
+        DWORD write_cursor;
+        if (global_secondary_buffer && SUCCEEDED(global_secondary_buffer->GetCurrentPosition(&play_cursor, &write_cursor))) {
+            
+            // Calculamos el byte exacto donde NOSOTROS nos quedamos escribiendo la última vez.
+            // Usamos modulo (%) porque es un buffer circular.
+            DWORD byte_to_lock = (sound_output.running_sample_index * sound_output.bytes_per_sample) % sound_output.secondary_buffer_size;
+            
+            // Calculamos hasta dónde queremos escribir (Target Cursor)
+            // Queremos mantener la latencia constante (ej. siempre 60ms adelante del Play Cursor real)
+            DWORD target_cursor = (play_cursor + (sound_output.latency_sample_count * sound_output.bytes_per_sample)) % sound_output.secondary_buffer_size;
+            
+            DWORD bytes_to_write;
+
+            // Lógica circular: ¿El target está adelante o dio la vuelta?
+            if (byte_to_lock > target_cursor) {
+                // Caso A: Dio la vuelta (Wrap around)
+                // Escribimos hasta el final + lo que falta del principio
+                bytes_to_write = (sound_output.secondary_buffer_size - byte_to_lock) + target_cursor;
+            } else {
+                // Caso B: Lineal
+                bytes_to_write = target_cursor - byte_to_lock;
+            }
+            
+            // Rellenamos el hueco
+            win32_fill_sound_buffer(&sound_output, byte_to_lock, bytes_to_write);
+        }
+
         LARGE_INTEGER work_counter_begin; 
         QueryPerformanceCounter(&work_counter_begin);
 
@@ -716,6 +807,7 @@ int main() {
 
         // Update last frame time
         last_counter = work_counter_begin;
+
 
         // Update and render game state
         if (global_back_buffer.memory) {
