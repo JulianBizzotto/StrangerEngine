@@ -63,6 +63,21 @@ struct GameSoundOutput {
     int latency_sample_count;   // Cuánto nos adelantamos al cursor de reproducción
 };
 
+struct GameState{
+    float player_x;
+    float player_y;
+
+    float player_vel_x;
+    float player_vel_y;
+
+    bool is_grounded;
+};
+
+struct AABB {
+    float x, y;
+    float w, h;
+};
+
 
 // ##################################################################
 //                          Platform Globals
@@ -76,9 +91,7 @@ static GameBuffer global_back_buffer;
 
 static GameSoundOutput global_sound_output;
 
-// Player position in world coordinates
-static float player_x = 100.0f;
-static float player_y = 100.0f;
+static GameState game_state;
 
 // ##################################################################
 //                  Platform Functions Declarations
@@ -520,15 +533,18 @@ void draw_rect(GameBuffer* buffer, int x, int y, int width, int height, uint32_t
     }
 }
 
-// Detects axis-aligned bounding box collision between two rectangles
-// Returns true if the boxes overlap, false otherwise
-bool check_collision(float x1, float y1, int w1, int h1, float x2, float y2, int w2, int h2){
-    // Check if there is overlap on both X and Y axes
-    bool collision_x = (x1 < x2 + w2) && (x1 + w1 > x2);
-    bool collision_y = (y1 < y2 + h2) && (y1 + h1 > y2);
-
-    // Collision occurs only if overlapping on both axes
-    return collision_x && collision_y;
+bool check_aabb_collision(AABB a, AABB b) {
+    // Si A está a la izquierda de B
+    if (a.x + a.w < b.x) return false;
+    // Si A está a la derecha de B
+    if (a.x > b.x + b.w) return false;
+    // Si A está arriba de B
+    if (a.y + a.h < b.y) return false;
+    // Si A está abajo de B
+    if (a.y > b.y + b.h) return false;
+    
+    // Si no se cumple nada de lo anterior, se están tocando
+    return true;
 }
 
 // Draws a bitmap/sprite to the back buffer at the specified position
@@ -646,54 +662,113 @@ void draw_bitmap_alpha(GameBuffer* buffer, LoadedBitmap* bitmap, float x, float 
         source_row += bitmap->width;
     }
 }
-// Main game update and rendering function
-// Called once per frame with delta time since last frame
 void game_update_and_render(GameBuffer* buffer, GameInput* input, float dt) {
 
-    // 1. Clear screen
+    // 1. Limpiar pantalla
     draw_rect(buffer, 0, 0, buffer->width, buffer->height, 0xFF333333);
 
-    // 2. Define obstacle (wall)
-    float wall_x = 400.0f;
-    float wall_y = 300.0f;
+    // 2. Definir Paredes y Constantes
+    float wall_x = 600.0f; // Coincide con tu AABB wall
+    float wall_y = 400.0f;
     int wall_w = 100;
     int wall_h = 200;
 
-    // 3. Player movement (tentative position)
-    // Store the "potential" next position
-    float next_x = player_x;
-    float next_y = player_y;
-    float speed = 500.0f; // Pixels per second
+    float gravity = 2000.0f;    
+    float jump_force = -900.0f; 
+    float run_speed = 400.0f;   
+    float ground_y = 500.0f;    
 
+    // Definimos las cajas (Hitboxes)
+    AABB wall = { wall_x, wall_y, (float)wall_w, (float)wall_h };
+    float player_w = 64.0f; // Asumiendo que tu héroe mide 64x64
+    float player_h = 64.0f;
 
-    if (input->left.is_down)  next_x -= speed * dt;
-    if (input->right.is_down) next_x += speed * dt;
-    if (input->up.is_down)    next_y -= speed * dt;
-    if (input->down.is_down)  next_y += speed * dt;
+    // ---------------------------------------------------------
+    // ¡ESTO FALTABA! CONEXIÓN INPUT -> FÍSICA
+    // ---------------------------------------------------------
+    
+    // Reseteamos la velocidad X cada frame para tener control preciso (estilo Mario)
+    // Si no presionas nada, la velocidad es 0.
+    game_state.player_vel_x = 0; 
 
-    // 4. COLLISION DETECTION
-    // Check if the new position would collide with the wall
-    bool hit = check_collision(next_x, next_y, 50, 50, wall_x, wall_y, wall_w, wall_h);
-
-    // Player color (changes on collision)
-    uint32_t player_color = 0xFF00FF00; // Green (normal)
-
-    if (hit) {
-        player_color = 0xFFFF0000; // Red (collision!)
-        // OPTION A: Allow passing through wall but change color (trigger)
-        player_x = next_x;
-        player_y = next_y;
-    } else {
-        // No collision, move normally
-        player_x = next_x;
-        player_y = next_y;
+    if (input->left.is_down) {
+        game_state.player_vel_x = -run_speed;
+    }
+    if (input->right.is_down) {
+        game_state.player_vel_x = run_speed;
     }
 
-    // 5. Draw obstacle (light gray)
-    draw_rect(buffer, (int)wall_x, (int)wall_y, wall_w, wall_h, 0xFF888888);
+    // Salto
+    if (input->up.is_down && input->up.changed && game_state.is_grounded) {
+        game_state.player_vel_y = jump_force;
+        game_state.is_grounded = false;
+    }
 
-    // 6. Draw player sprite
-    draw_bitmap_alpha(buffer, &hero_bitmap, player_x, player_y);
+    // ---------------------------------------------------------
+    // INTEGRACIÓN DE FÍSICA Y COLISIONES
+    // ---------------------------------------------------------
+
+    // --- A. MOVIMIENTO HORIZONTAL (Eje X) ---
+    float next_x = game_state.player_x + (game_state.player_vel_x * dt);
+    AABB player_box_x = { next_x, game_state.player_y, player_w, player_h };
+    
+    if (check_aabb_collision(player_box_x, wall)) {
+        // Choque lateral: Frenamos en seco
+        game_state.player_vel_x = 0;
+    } else {
+        // Vía libre
+        game_state.player_x = next_x;
+    }
+
+    // --- B. MOVIMIENTO VERTICAL (Eje Y) ---
+    game_state.player_vel_y += gravity * dt; 
+    float next_y = game_state.player_y + (game_state.player_vel_y * dt);
+    
+    AABB player_box_y = { game_state.player_x, next_y, player_w, player_h };
+
+    if (check_aabb_collision(player_box_y, wall)) {
+        // Choque vertical con la pared (Techo o Plataforma)
+        if (game_state.player_vel_y > 0) {
+            // Caíamos: Aterrizamos sobre la caja
+            // Ajuste fino: Nos posamos exactamente encima
+            game_state.player_y = wall.y - player_h; 
+            game_state.player_vel_y = 0;
+            game_state.is_grounded = true;
+        } else {
+            // Saltábamos: Nos dimos la cabeza contra la caja
+            // Ajuste fino: Nos quedamos justo debajo
+            game_state.player_y = wall.y + wall.h;
+            game_state.player_vel_y = 0;
+        }
+    } else {
+        // No tocamos la pared, probamos el suelo global
+        game_state.player_y = next_y;
+        
+        // CORRECCIÓN: Chequeamos los "pies" (y + h), no la cabeza
+        if (game_state.player_y + player_h >= ground_y) {
+            game_state.player_y = ground_y - player_h; // Los pies tocan el suelo
+            game_state.player_vel_y = 0;
+            game_state.is_grounded = true;
+        } else {
+            // Estamos en el aire
+            game_state.is_grounded = false;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // RENDERIZADO
+    // ---------------------------------------------------------
+
+    // Dibujar piso (Referencia)
+    draw_rect(buffer, 0, (int)ground_y, buffer->width, 50, 0xFF000000);
+
+    // Dibujar pared
+    draw_rect(buffer, (int)wall.x, (int)wall.y, (int)wall.w, (int)wall.h, 0xFF888888);
+
+    // Dibujar Jugador
+    // NOTA: Borré el "- hero_bitmap.height" porque ya corregimos la lógica del suelo arriba.
+    // Ahora game_state.player_y es la esquina superior izquierda real.
+    draw_bitmap_alpha(buffer, &hero_bitmap, game_state.player_x, game_state.player_y);
 }
 
 // Main entry point of the application
@@ -759,6 +834,12 @@ int main() {
     if (global_secondary_buffer) {
         global_secondary_buffer->Play(0, 0, DSBPLAY_LOOPING);
     }
+
+    // --- INICIALIZACIÓN DEL JUEGO ---
+    game_state.player_x = 100.0f;
+    game_state.player_y = 100.0f;
+    game_state.player_vel_x = 0;
+    game_state.player_vel_y = 0;
 
     // --- MAIN GAME LOOP ---
     while(running){
