@@ -1,6 +1,18 @@
 #include <iostream>
 #include <stdint.h> 
 #include <stdio.h> // Required for fopen, fseek, fread
+#include <dsound.h> // Required for DirectSound
+#include <math.h>   // Required for math functions like sin, cos
+
+// Definición de PI por si acaso no está
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
+// ##################################################################
+//                      DirectSound Types
+// ##################################################################
+typedef HRESULT(WINAPI* direct_sound_create)(LPCGUID, LPDIRECTSOUND*, LPUNKNOWN);
 
 // ##################################################################
 //                          Engine Types
@@ -42,6 +54,15 @@ struct ReadResult {
     size_t content_size; // Size of the loaded file in bytes
 };
 
+struct GameSoundOutput {
+    int samples_per_second;     // Frecuencia de muestreo (48000 Hz)
+    uint32_t running_sample_index; // El "tiempo" t acumulado (nunca se resetea)
+    int bytes_per_sample;       // sizeof(int16) * 2 canales = 4 bytes
+    int secondary_buffer_size;  // Tamaño total del buffer circular en bytes
+    float t_sine;               // Fase de la onda senoidal (radianes)
+    int latency_sample_count;   // Cuánto nos adelantamos al cursor de reproducción
+};
+
 
 // ##################################################################
 //                          Platform Globals
@@ -52,6 +73,8 @@ static bool running = true;
 
 // Global back buffer used for all drawing operations
 static GameBuffer global_back_buffer;
+
+static GameSoundOutput global_sound_output;
 
 // Player position in world coordinates
 static float player_x = 100.0f;
@@ -98,6 +121,79 @@ static BITMAPINFO bitmap_info;
 
 // The loaded hero/player bitmap
 static LoadedBitmap hero_bitmap;
+
+// Puntero global al buffer donde escribiremos el audio
+static LPDIRECTSOUNDBUFFER global_secondary_buffer;
+
+void win32_init_dsound(HWND window, int32_t samples_per_second, int32_t buffer_size) {
+    // 1. Cargar la librería dinámicamente
+    HMODULE dsound_library = LoadLibraryA("dsound.dll");
+    
+    if (dsound_library) {
+        // Obtenemos la dirección de la función creadora
+        direct_sound_create DirectSoundCreatePtr = 
+            (direct_sound_create)GetProcAddress(dsound_library, "DirectSoundCreate");
+
+        LPDIRECTSOUND direct_sound;
+        if (DirectSoundCreatePtr && SUCCEEDED(DirectSoundCreatePtr(0, &direct_sound, 0))) {
+            
+            // 2. Establecer nivel de cooperación
+            // DSSCL_PRIORITY nos permite cambiar el formato de audio del buffer primario
+            if (SUCCEEDED(direct_sound->SetCooperativeLevel(window, DSSCL_PRIORITY))) {
+                
+                // 3. Configurar el BUFFER PRIMARIO (El mezclador de Windows)
+                // No escribimos aquí, solo le decimos a Windows cómo mezclar.
+                DSBUFFERDESC primary_buffer_desc = {};
+                primary_buffer_desc.dwSize = sizeof(primary_buffer_desc);
+                primary_buffer_desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+
+                LPDIRECTSOUNDBUFFER primary_buffer;
+                if (SUCCEEDED(direct_sound->CreateSoundBuffer(&primary_buffer_desc, &primary_buffer, 0))) {
+                    
+                    // Definimos el formato: PCM, Stereo, 48kHz, 16-bit
+                    WAVEFORMATEX wave_format = {};
+                    wave_format.wFormatTag = WAVE_FORMAT_PCM;
+                    wave_format.nChannels = 2;
+                    wave_format.nSamplesPerSec = samples_per_second;
+                    wave_format.wBitsPerSample = 16;
+                    wave_format.nBlockAlign = (wave_format.nChannels * wave_format.wBitsPerSample) / 8;
+                    wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * wave_format.nBlockAlign;
+                    wave_format.cbSize = 0;
+
+                    if (SUCCEEDED(primary_buffer->SetFormat(&wave_format))) {
+                        // ¡Formato maestro establecido!
+                        std::cout << "Audio Primario configurado a 48kHz Stereo." << std::endl;
+                    }
+                }
+            }
+
+            // 4. Crear el BUFFER SECUNDARIO (Nuestro Buffer Circular)
+            DSBUFFERDESC secondary_buffer_desc = {};
+            secondary_buffer_desc.dwSize = sizeof(secondary_buffer_desc);
+            secondary_buffer_desc.dwFlags = 0; 
+            secondary_buffer_desc.dwBufferBytes = buffer_size;
+            
+            // Le damos el mismo formato que al primario
+            WAVEFORMATEX wave_format = {};
+            wave_format.wFormatTag = WAVE_FORMAT_PCM;
+            wave_format.nChannels = 2;
+            wave_format.nSamplesPerSec = samples_per_second;
+            wave_format.wBitsPerSample = 16;
+            wave_format.nBlockAlign = (wave_format.nChannels * wave_format.wBitsPerSample) / 8;
+            wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * wave_format.nBlockAlign;
+
+            secondary_buffer_desc.lpwfxFormat = &wave_format;
+
+            if (SUCCEEDED(direct_sound->CreateSoundBuffer(&secondary_buffer_desc, &global_secondary_buffer, 0))) {
+                std::cout << "Buffer Secundario de Audio Creado Exitosamente." << std::endl;
+            }
+        } else {
+            std::cout << "No se pudo crear el objeto DirectSound." << std::endl;
+        }
+    } else {
+        std::cout << "No se pudo cargar dsound.dll" << std::endl;
+    }
+}
 
 // Allocates and resizes the back buffer to the specified dimensions
 void win32_resize_DIB_section(GameBuffer* buffer, int width, int height) {
@@ -585,6 +681,22 @@ int main() {
         // 2. FALLBACK: Generate a procedural texture to keep the game running
         std::cout << "Using procedural texture..." << std::endl;
         hero_bitmap = make_test_bitmap(32, 32);
+    }
+
+    // --- SONIDO: Inicialización ---
+    GameSoundOutput sound_output = {};
+    sound_output.samples_per_second = 48000;
+    sound_output.bytes_per_sample = sizeof(int16_t) * 2; // 4 bytes
+    sound_output.latency_sample_count = sound_output.samples_per_second / 15; // 1/15 segundos de latencia
+    // Buffer de 1 segundo
+    sound_output.secondary_buffer_size = sound_output.samples_per_second * sound_output.bytes_per_sample; 
+    
+    // Inicializamos DirectSound
+    win32_init_dsound(window, sound_output.samples_per_second, sound_output.secondary_buffer_size);
+    
+    // Arrancamos el buffer en silencio (Looping infinito)
+    if (global_secondary_buffer) {
+        global_secondary_buffer->Play(0, 0, DSBPLAY_LOOPING);
     }
 
     // --- MAIN GAME LOOP ---

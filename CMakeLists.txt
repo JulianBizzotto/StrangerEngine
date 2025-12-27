@@ -16,5 +16,5 @@ add_executable(strangerEngine ${SOURCE_FILES})
 
 # 3. Linkeamos las librerías necesarias para Windows
 if(WIN32)
-    target_link_libraries(strangerEngine PRIVATE user32 gdi32 winmm)
+    target_link_libraries(strangerEngine PRIVATE user32 gdi32 winmm dsound)
 endif()
